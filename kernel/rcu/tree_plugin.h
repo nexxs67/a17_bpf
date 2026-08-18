@@ -2323,7 +2323,13 @@ lazy_rcu_shrink_count(struct shrinker *shrink, struct shrink_control *sc)
 		count +=  READ_ONCE(rdp->lazy_len);
 	}
 
-	return count ? count : SHRINK_EMPTY;
+	/*
+	 * SHRINK_EMPTY only exists since 4.19 and is not understood by this
+	 * tree's do_shrink_slab(), which bails out on freeable == 0 anyway.
+	 * Returning the raw count gives identical behaviour here; the 4.19
+	 * sentinel (~0UL - 1) would instead be read as a huge object count.
+	 */
+	return count;
 }
 
 static unsigned long
