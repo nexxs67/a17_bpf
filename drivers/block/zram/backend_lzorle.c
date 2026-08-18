@@ -33,8 +33,17 @@ static int lzorle_compress(struct zcomp_params *params, struct zcomp_ctx *ctx,
 {
 	int ret;
 
-	ret = lzorle1x_1_compress(req->src, req->src_len, req->dst,
-				  &req->dst_len, ctx->context);
+	/*
+	 * lzorle1x_1_compress() (LZO-RLE) landed upstream in 5.1 and is not
+	 * present in this tree's lib/lzo. Backporting it would also require
+	 * teaching lzo1x_decompress_safe() the new run-length opcodes, and a
+	 * mistake there corrupts swap pages, so fall back to plain LZO here.
+	 * The stream stays self-consistent: it is produced by lzo1x_1_compress()
+	 * and consumed by lzo1x_decompress_safe() below. Only the extra ratio
+	 * that RLE gives on zero-filled pages is lost.
+	 */
+	ret = lzo1x_1_compress(req->src, req->src_len, req->dst,
+			       &req->dst_len, ctx->context);
 	return ret == LZO_E_OK ? 0 : ret;
 }
 
