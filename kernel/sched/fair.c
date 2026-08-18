@@ -4133,6 +4133,8 @@ static inline unsigned long uclamp_task_util(struct task_struct *p)
 		     uclamp_eff_value(p, UCLAMP_MAX));
 }
 #else
+static inline unsigned long boosted_task_util(struct task_struct *task);
+
 static inline unsigned long uclamp_task_util(struct task_struct *p)
 {
 	return boosted_task_util(p);
