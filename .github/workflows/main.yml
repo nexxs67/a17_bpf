@@ -14,7 +14,7 @@ jobs:
   SLEEPYCI:
     if: "(! contains(toJSON(github.event.commits.*.message), '[skip-ci]'))"
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     permissions:
       contents: write
     steps:
@@ -27,8 +27,9 @@ jobs:
           sudo -E apt-get -qq install git make bc bison \
           openssl curl zip kmod cpio flex libelf-dev \
           libssl-dev libtfm-dev wget device-tree-compiler \
-          ca-certificates python3 binutils \
+          ca-certificates python3 binutils dwarves \
           binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+          pahole --version || echo "WARNING: pahole missing, CONFIG_DEBUG_INFO_BTF will fail"
 
     - name: Export Vars
       run: |
@@ -38,42 +39,71 @@ jobs:
         DEV: ${{ github.event.inputs.DEPLOY_DEVICE_TYPE }}
 
     - name: Building Kernel..
+      id: build
       run: |
           curl -sL https://raw.githubusercontent.com/doctorstrange2003/builder/refs/heads/main/build.sh > kernel.sh
 
-          # 1. вырезаем финальную уборку — иначе ZIP удалится до публикации
+          # keep artifacts: drop the final cleanup line
           sed -i '/^rm -rf out zip error.log zipsigner-3.0.jar/d' kernel.sh
-
-          # 2. глушим все вызовы телеграм-бота (определения функций не трогаем)
+          # neutralise telegram calls (function definitions must stay intact)
           sed -i -E 's/^([[:space:]]*)tg_(post_msg|post_build|error)[[:space:]]/\1: /' kernel.sh
+          # dtb.img is not produced by this tree; do not let cp abort packaging.
+          # NOTE: delimiter must not be '|', the replacement contains '|| true'.
+          sed -i 's@^cp "$IMG" "$DTBO" "$DTB" zip/@cp "$IMG" zip/; cp "$DTBO" zip/ 2>/dev/null || true; cp "$DTB" zip/ 2>/dev/null || true@' kernel.sh
+
+          # fail loudly if upstream build.sh changed and a patch silently missed
+          grep -q '^rm -rf out zip error.log zipsigner' kernel.sh \
+            && { echo "::error::cleanup line still present, artifacts would be wiped"; exit 1; } || true
+          grep -q 'cp "$IMG" zip/' kernel.sh \
+            || { echo "::error::dtb cp patch did not apply"; exit 1; }
+          bash -n kernel.sh || { echo "::error::patched build.sh has a syntax error"; exit 1; }
 
           chmod +x kernel.sh
           bash kernel.sh
       shell: bash
 
     - name: Collect artifacts
+      if: always()
       run: |
           mkdir -p release
-          cp zip/*-signed.zip release/
-          cp out/arch/arm64/boot/Image.gz  release/ || true
-          cp out/arch/arm64/boot/dtbo.img  release/ || true
-          ls -lh release/
+          cp zip/*-signed.zip release/ 2>/dev/null || true
+          cp out/arch/arm64/boot/Image.gz release/ 2>/dev/null || true
+          cp out/arch/arm64/boot/dtbo.img release/ 2>/dev/null || true
 
-    - name: Publish Release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: ${{ github.event.inputs.DEPLOY_TAG_TYPE }}
-        name: SLEEPY_KERNEL-OSS ${{ github.event.inputs.DEPLOY_TAG_TYPE }} (DAVINCI)
-        body: |
-          Kernel: SLEEPY_KERNEL-OSS
-          Device: Redmi K20 / Mi 9T (davinci)
-          Build: ${{ github.run_number }} — commit `${{ github.sha }}`
-        files: release/*
+          if [ "${{ steps.build.outcome }}" != "success" ] || [ ! -f out/arch/arm64/boot/Image.gz ]; then
+            echo "BUILD_OK=false" >> $GITHUB_ENV
+            if [ -f error.log ]; then
+              cp error.log "release/error-${{ github.run_number }}.log"
+              tail -n 400 error.log > "release/error-${{ github.run_number }}-tail.log" || true
+            else
+              echo "build failed before error.log was created" > "release/error-${{ github.run_number }}.log"
+            fi
+          else
+            echo "BUILD_OK=true" >> $GITHUB_ENV
+          fi
+          ls -lh release/ || true
 
-    - name: Upload build log on failure
-      if: failure()
+    - name: Upload build log (artifact)
+      if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: error-log
+        name: build-log-${{ github.run_number }}
         path: error.log
         if-no-files-found: ignore
+
+    - name: Publish Release
+      if: always()
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.event.inputs.DEPLOY_TAG_TYPE }}-${{ github.run_number }}
+        name: >-
+          a17_test_bpf ${{ github.event.inputs.DEPLOY_TAG_TYPE }} (DAVINCI)${{ env.BUILD_OK == 'true' && '' || ' - BUILD FAILED' }}
+        prerelease: ${{ env.BUILD_OK != 'true' }}
+        make_latest: ${{ env.BUILD_OK == 'true' }}
+        body: |
+          Kernel: a17_test_bpf (LineageOS sm6150 + fake uname commits from PhoenixKernel)
+          Device: Redmi K20 / Mi 9T (davinci)
+          Build: ${{ github.run_number }} - commit `${{ github.sha }}`
+          Status: ${{ env.BUILD_OK == 'true' && 'SUCCESS' || 'FAILED - see error log asset below' }}
+        files: release/*
+        fail_on_unmatched_files: false
